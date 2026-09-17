@@ -4,6 +4,18 @@ import SuccessResponse from '../utils/SuccessResponse';
 import asyncHandler from '../utils/asyncHandler';
 import AppError from '../utils/AppError';
 import { QueryFilters, buildFilters } from '../utils/queryFilters';
+import {
+  createIdempotentBooking,
+  BookingInput,
+  BookingSource,
+} from '../services/bookingService';
+
+const BOOKING_SOURCES: BookingSource[] = ['ai-agent', 'admin', 'manual'];
+
+const resolveSource = (value: unknown, fallback: BookingSource): BookingSource =>
+  BOOKING_SOURCES.includes(value as BookingSource)
+    ? (value as BookingSource)
+    : fallback;
 
 export const getBookings = asyncHandler(async (req: Request, res: Response) => {
   const query = req.query as QueryFilters;
@@ -45,25 +57,36 @@ export const getBookingById = asyncHandler(async (req: Request, res: Response) =
 });
 
 export const createBooking = asyncHandler(async (req: Request, res: Response) => {
-  const booking = await Booking.create({
-    ...req.body,
-    source: req.body.source || 'admin',
+  const body = (req.body ?? {}) as BookingInput & { source?: unknown };
+
+  const { booking, created, duplicate } = await createIdempotentBooking(body, {
+    idempotencyKey: req.get('Idempotency-Key') ?? undefined,
+    source: resolveSource(body.source, 'admin'),
   });
 
-  return new SuccessResponse(res, 'Booking created successfully', booking, 201);
+  return new SuccessResponse(
+    res,
+    duplicate
+      ? 'Duplicate booking detected - existing booking returned'
+      : 'Booking created successfully',
+    { ...booking.toObject(), duplicate },
+    created ? 201 : 200,
+  );
 });
 
 export const updateBooking = asyncHandler(async (req: Request, res: Response) => {
-  let booking = await Booking.findById(req.params.id);
+  const booking = await Booking.findById(req.params.id);
 
   if (!booking) {
     throw new AppError(`Booking not found with id: ${req.params.id}`, 404);
   }
 
-  booking = await Booking.findByIdAndUpdate(req.params.id, req.body, {
-    new: true,
-    runValidators: true,
-  });
+  const updates = { ...((req.body ?? {}) as Record<string, unknown>) };
+  delete updates.dedupKey;
+  delete updates.idempotencyKey;
+
+  Object.assign(booking, updates);
+  await booking.save();
 
   return new SuccessResponse(res, 'Booking updated successfully', booking);
 });
@@ -91,6 +114,9 @@ export const updateBookingStatus = asyncHandler(
     }
 
     booking.status = status;
+    if (status === 'cancelled') {
+      booking.dedupKey = undefined;
+    }
     await booking.save();
 
     return new SuccessResponse(res, 'Booking status updated successfully', booking);

@@ -1,5 +1,6 @@
 import mongoose, { Schema, Document, InferSchemaType } from 'mongoose';
 import crypto from 'crypto';
+import { bookingFingerprint } from '../utils/bookingFingerprint';
 
 const RESERVATION_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -74,9 +75,36 @@ export const bookingSchema = new Schema(
       default: 'pending',
       index: true,
     },
+    dedupKey: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
+    idempotencyKey: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      index: true,
+    },
   },
   {
     timestamps: true,
+    toJSON: {
+      transform: (_doc, ret) => {
+        delete ret.dedupKey;
+        delete ret.idempotencyKey;
+        return ret;
+      },
+    },
+    toObject: {
+      transform: (_doc, ret) => {
+        delete ret.dedupKey;
+        delete ret.idempotencyKey;
+        return ret;
+      },
+    },
   }
 );
 
@@ -86,6 +114,18 @@ bookingSchema.pre('save', async function (next) {
   if (!this.reservationNumber) {
     this.reservationNumber = generateReservationNumber();
   }
+
+  if (this.status !== 'cancelled') {
+    this.dedupKey = bookingFingerprint({
+      fullName: this.fullName,
+      phone: this.phone,
+      email: this.email,
+      serviceType: this.serviceType,
+      preferredDate: this.preferredDate,
+      preferredTime: this.preferredTime,
+    });
+  }
+
   next();
 });
 

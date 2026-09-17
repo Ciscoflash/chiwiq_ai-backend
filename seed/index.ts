@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import connectDB from '../config/db';
 import Admin from '../models/Admin';
 import Booking, { generateReservationNumber } from '../models/Booking';
+import { bookingFingerprint } from '../utils/bookingFingerprint';
 import { sampleBookings, type SeedBookingInput } from './data/bookings';
 
 dotenv.config();
@@ -73,6 +74,54 @@ async function backfillReservationNumbers(): Promise<void> {
   console.log(`\u2713 Assigned reservation numbers to ${missing.length} booking(s)`);
 }
 
+async function backfillDedupKeys(): Promise<void> {
+  const missing = await Booking.find({
+    $or: [{ dedupKey: { $exists: false } }, { dedupKey: '' }],
+    status: { $ne: 'cancelled' },
+  });
+
+  if (missing.length === 0) {
+    console.log('\u2713 All bookings already have fingerprint keys');
+    return;
+  }
+
+  const seen = new Set<string>();
+  let assigned = 0;
+
+  for (const booking of missing) {
+    const fingerprint = bookingFingerprint({
+      fullName: booking.fullName,
+      phone: booking.phone,
+      email: booking.email,
+      serviceType: booking.serviceType,
+      preferredDate: booking.preferredDate,
+      preferredTime: booking.preferredTime,
+    });
+
+    if (seen.has(fingerprint)) {
+      console.log(
+        `  \u2192 Skipped legacy duplicate booking ${booking._id} (kept without fingerprint)`,
+      );
+      continue;
+    }
+
+    try {
+      booking.dedupKey = fingerprint;
+      await booking.save();
+      seen.add(fingerprint);
+      assigned += 1;
+    } catch (error) {
+      const code = (error as { code?: number }).code;
+      if (code !== 11000) throw error;
+      console.log(
+        `  \u2192 Skipped legacy duplicate booking ${booking._id} (fingerprint already taken)`,
+      );
+    }
+  }
+
+  console.log(`\u2713 Assigned fingerprint keys to ${assigned} booking(s)`);
+}
+
 async function main(): Promise<void> {
   await connectDB();
   console.log('Seeding Chiwiq database...\n');
@@ -80,6 +129,7 @@ async function main(): Promise<void> {
   await seedAdmin();
   await seedBookings();
   await backfillReservationNumbers();
+  await backfillDedupKeys();
 
   console.log('\nSeeding complete.');
 

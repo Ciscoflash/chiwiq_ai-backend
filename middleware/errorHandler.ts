@@ -6,6 +6,8 @@ import AppError from '../utils/AppError';
 interface MongoError extends Error {
   code?: number;
   keyValue?: Record<string, unknown>;
+  type?: string;
+  status?: number;
 }
 
 const notFound = (req: Request, res: Response, next: NextFunction): void => {
@@ -50,12 +52,21 @@ const errorHandler = (
     error = new AppError('Token expired. Please log in again.', 401);
   }
 
+  if (mongoError.type === 'entity.parse.failed') {
+    error = new AppError('Request body is not valid JSON', 400);
+  }
+
+  if (mongoError.type === 'entity.too.large') {
+    error = new AppError('Request body is too large', 413);
+  }
+
   console.error(err.stack);
 
   return new ErrorResponse(
     res,
     error.message || 'Server Error',
     error.statusCode || 500,
+    error.details,
   );
 };
 

@@ -1,96 +1,123 @@
 import { Request, Response } from 'express';
-import Booking from '../models/Booking';
 import SuccessResponse from '../utils/SuccessResponse';
 import AppError from '../utils/AppError';
 import asyncHandler from '../utils/asyncHandler';
+import {
+  createIdempotentBooking,
+  BookingInput,
+} from '../services/bookingService';
 
 interface WebhookPayload {
-  fullName?: string;
-  name?: string;
-  phone?: string;
-  email?: string;
-  serviceType?: string;
-  service?: string;
-  bookingType?: string;
-  preferredDate?: string;
-  date?: string;
-  preferredTime?: string;
-  time?: string;
-  numberOfPeople?: number;
-  people?: number;
-  notes?: string;
-  specialRequests?: string;
-  additionalNotes?: string;
-  reservationNumber?: string;
-  bookingNumber?: string;
-  reservationRef?: string;
-  bookingRef?: string;
-  reference?: string;
+  fullName?: unknown;
+  name?: unknown;
+  phone?: unknown;
+  phoneNumber?: unknown;
+  mobile?: unknown;
+  email?: unknown;
+  emailAddress?: unknown;
+  serviceType?: unknown;
+  service?: unknown;
+  bookingType?: unknown;
+  preferredDate?: unknown;
+  date?: unknown;
+  bookingDate?: unknown;
+  preferredTime?: unknown;
+  time?: unknown;
+  bookingTime?: unknown;
+  numberOfPeople?: unknown;
+  people?: unknown;
+  partySize?: unknown;
+  guests?: unknown;
+  notes?: unknown;
+  specialRequests?: unknown;
+  additionalNotes?: unknown;
+  message?: unknown;
+  reservationNumber?: unknown;
+  bookingNumber?: unknown;
+  reservationRef?: unknown;
+  bookingRef?: unknown;
+  reference?: unknown;
+  idempotencyKey?: unknown;
+  eventId?: unknown;
+  messageId?: unknown;
   [key: string]: unknown;
 }
 
-const pick = (value: string | undefined, fallback: string): string =>
-  value !== undefined && String(value).trim() !== '' ? String(value).trim() : fallback;
+const firstDefined = (...values: unknown[]): unknown =>
+  values.find(
+    (value) =>
+      value !== undefined && value !== null && String(value).trim() !== '',
+  );
 
 const createBookingFromWebhook = asyncHandler(
   async (req: Request, res: Response) => {
-    const body = req.body as WebhookPayload;
+    const body = (req.body ?? {}) as WebhookPayload;
 
-  if (!body || Object.keys(body).length === 0) {
-    throw new AppError('Empty webhook payload received', 400);
-  }
+    if (!body || Object.keys(body).length === 0) {
+      throw new AppError('Empty webhook payload received', 400);
+    }
 
-  const fullName = pick(body.fullName ?? body.name, '');
-  const phone = pick(body.phone, '');
-  const email = pick(body.email, '').toLowerCase();
-  const serviceType = pick(body.serviceType ?? body.service ?? body.bookingType, '');
-  const preferredDate = pick(body.preferredDate ?? body.date, '');
-  const preferredTime = pick(body.preferredTime ?? body.time, '');
-  const notes = pick(
-    body.notes ?? body.specialRequests ?? body.additionalNotes,
-    ''
-  );
-  const numberOfPeople =
-    typeof body.numberOfPeople === 'number'
-      ? body.numberOfPeople
-      : typeof body.people === 'number'
-        ? body.people
-        : body.numberOfPeople
-          ? Number(body.numberOfPeople)
-          : body.people
-            ? Number(body.people)
-            : 1;
-  const reservationNumber = pick(
-    body.reservationNumber ?? body.bookingNumber ?? body.reservationRef ?? body.bookingRef ?? body.reference,
-    ''
-  );
+    const input: BookingInput = {
+      fullName: firstDefined(body.fullName, body.name),
+      phone: firstDefined(body.phone, body.phoneNumber, body.mobile),
+      email: firstDefined(body.email, body.emailAddress),
+      serviceType: firstDefined(body.serviceType, body.service, body.bookingType),
+      preferredDate: firstDefined(
+        body.preferredDate,
+        body.date,
+        body.bookingDate,
+      ),
+      preferredTime: firstDefined(
+        body.preferredTime,
+        body.time,
+        body.bookingTime,
+      ),
+      numberOfPeople: firstDefined(
+        body.numberOfPeople,
+        body.people,
+        body.partySize,
+        body.guests,
+      ),
+      notes: firstDefined(
+        body.notes,
+        body.specialRequests,
+        body.additionalNotes,
+        body.message,
+      ),
+      reservationNumber: firstDefined(
+        body.reservationNumber,
+        body.bookingNumber,
+        body.reservationRef,
+        body.bookingRef,
+        body.reference,
+      ),
+    };
 
-  try {
-    const booking = await Booking.create({
-      fullName,
-      phone,
-      email,
-      serviceType,
-      preferredDate,
-      preferredTime,
-      numberOfPeople: Number.isFinite(numberOfPeople) && numberOfPeople > 0 ? numberOfPeople : 1,
-      notes,
-      reservationNumber: reservationNumber || undefined,
-      source: 'ai-agent',
-      status: 'pending',
-    });
+    const idempotencyKey = firstDefined(
+      req.get('Idempotency-Key'),
+      body.idempotencyKey,
+      body.eventId,
+      body.messageId,
+    );
+
+    const { booking, created, duplicate } = await createIdempotentBooking(
+      input,
+      {
+        idempotencyKey:
+          typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
+        source: 'ai-agent',
+      },
+    );
 
     return new SuccessResponse(
       res,
-      'Booking captured successfully',
-      booking,
-      201
+      duplicate
+        ? 'Duplicate booking detected - existing booking returned'
+        : 'Booking captured successfully',
+      { ...booking.toObject(), duplicate },
+      created ? 201 : 200,
     );
-  } catch (error) {
-    const err = error as Error & { name?: string; message?: string };
-    throw new AppError(`Failed to capture booking: ${err.message}`, 500);
-  }
-  }
+  },
 );
 
 export { createBookingFromWebhook };
